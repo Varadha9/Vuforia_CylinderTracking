@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Vuforia Cylinder AR Tracking</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body { overflow: hidden; background: #000; color: #fff; width: 100vw; height: 100vh; touch-action: manipulation; }
+        
+        #video-feed {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1;
+        }
+        #three-canvas {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: auto;
+        }
+
+        /* Top Academic HUD */
+        .hud-header {
+            position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+            background: rgba(15, 23, 42, 0.92); backdrop-filter: blur(12px);
+            padding: 8px 18px; border-radius: 24px; z-index: 999;
+            display: flex; align-items: center; gap: 8px; width: 92%; max-width: 480px;
+            box-shadow: 0 6px 25px rgba(0,0,0,0.6); border: 1px solid rgba(56, 189, 248, 0.4);
+            justify-content: space-between;
+        }
+        .header-left { display: flex; align-items: center; gap: 8px; }
+        .status-dot {
+            width: 10px; height: 10px; border-radius: 50%; background: #f59e0b;
+            box-shadow: 0 0 10px #f59e0b; animation: pulse 1s infinite;
+        }
+        .status-dot.locked { background: #10b981; box-shadow: 0 0 12px #10b981; animation: none; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .header-title { font-size: 11.5px; font-weight: 700; color: #f8fafc; }
+        .header-subtitle { font-size: 9.5px; color: #38bdf8; }
+
+        /* Scanning Viewfinder Frame */
+        .scanner-frame {
+            position: absolute; top: 44%; left: 50%; transform: translate(-50%, -50%);
+            width: min(70vw, 240px); height: min(90vw, 320px); z-index: 999; pointer-events: none;
+            border: 2px dashed rgba(56, 189, 248, 0.8); border-radius: 20px;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            transition: all 0.25s ease;
+        }
+        .scanner-frame.locked {
+            border: 2.5px solid #10b981; box-shadow: 0 0 30px rgba(16, 185, 129, 0.5);
+            background: rgba(16, 185, 129, 0.05);
+        }
+        .laser-line {
+            position: absolute; width: 90%; height: 2px; background: #38bdf8;
+            box-shadow: 0 0 8px #38bdf8; top: 10px;
+            animation: scanLaser 1.8s infinite alternate ease-in-out;
+        }
+        @keyframes scanLaser {
+            0% { top: 10px; opacity: 0.85; }
+            100% { top: calc(100% - 12px); opacity: 0.85; }
+        }
+        .scanner-label {
+            position: absolute; bottom: -30px; font-size: 11px; font-weight: 700; color: #f1f5f9;
+            background: rgba(15, 23, 42, 0.85); padding: 4px 12px; border-radius: 12px;
+            white-space: nowrap; border: 1px solid rgba(255,255,255,0.15);
+        }
+
+        /* Bottom Controls */
+        .bottom-bar {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 999; display: flex; gap: 10px; width: 90%; max-width: 400px;
+            justify-content: center;
+        }
+        .btn {
+            background: linear-gradient(135deg, #0284c7, #0369a1);
+            border: 1px solid #38bdf8; color: #fff;
+            padding: 11px 18px; border-radius: 24px; font-size: 12px; font-weight: 700;
+            cursor: pointer; display: flex; align-items: center; gap: 6px;
+            box-shadow: 0 4px 15px rgba(2, 132, 199, 0.4);
+        }
+        .btn:active { transform: scale(0.96); }
+        .btn-green { background: linear-gradient(135deg, #059669, #047857); border-color: #34d399; }
+        .btn-purple { background: linear-gradient(135deg, #7c3aed, #6d28d9); border-color: #a78bfa; }
+
+        /* Hidden hidden canvas for image processing */
+        #cv-canvas { display: none; }
+        #ar-video { display: none; }
+    </style>
+    <script src="three.min.js"></script>
+    <script src="OrbitControls.js"></script>
+</head>
+<body>
+    <video id="video-feed" playsinline autoplay muted></video>
+    <canvas id="three-canvas"></canvas>
+    <canvas id="cv-canvas"></canvas>
+    <video id="ar-video" src="AugmentedDemoVideo.mp4" loop playsinline></video>
+
+    <!-- Header HUD -->
+    <div class="hud-header">
+        <div class="header-left">
+            <div class="status-dot" id="status-dot"></div>
+            <div>
+                <div class="header-title" id="status-text">SEARCHING: Point at Cylinder Target</div>
+                <div class="header-subtitle">Varad Mandhare (ADT23SOCB1574) | Ex:5 Vuforia AR</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scanner Reticle -->
+    <div class="scanner-frame" id="scanner-frame">
+        <div class="laser-line" id="laser-line"></div>
+        <div class="scanner-label" id="scanner-label">Align Cylinder In Reticle (D: 6.6cm, H: 12.2cm)</div>
+    </div>
+
+    <!-- Bottom Action Controls -->
+    <div class="bottom-bar">
+        <button class="btn btn-green" id="btn-toggle-track">Simulate Lock</button>
+        <button class="btn" id="btn-toggle-video">Play / Pause Video</button>
+        <button class="btn btn-purple" id="btn-reset">Reset</button>
+    </div>
+
+    <script>
+        let isTracked = false;
+        let scene, camera, renderer, controls;
+        let cylinderMesh, videoMesh, ringTop, ringBottom, holoCardMesh;
+        let videoTexture, arVideoElement;
+
+        const videoFeed = document.getElementById('video-feed');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const scannerFrame = document.getElementById('scanner-frame');
+        const laserLine = document.getElementById('laser-line');
+        const scannerLabel = document.getElementById('scanner-label');
+        arVideoElement = document.getElementById('ar-video');
+
+        // 1. Initialize Camera
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: false
+                });
+                videoFeed.srcObject = stream;
+            } catch (err) {
+                console.warn("Camera fallback:", err);
+            }
+        }
+
+        // 2. Initialize Three.js 3D Scene
+        function init3D() {
+            const canvas = document.getElementById('three-canvas');
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 100);
+            camera.position.set(0, 0.1, 0.65);
+
+            renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 0.2;
+            controls.maxDistance = 2.0;
+
+            // Lights
+            const ambient = new THREE.AmbientLight(0xffffff, 0.9);
+            scene.add(ambient);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            dirLight.position.set(2, 4, 3);
+            scene.add(dirLight);
+
+            // Container for all cylinder augmentations
+            window.cylinderGroup = new THREE.Group();
+            scene.add(window.cylinderGroup);
+
+            // 1. Cylinder Target Geometry (R=0.033, H=0.122) - Scaled 2.5x for crisp mobile viewing
+            const R = 0.033 * 2.5;
+            const H = 0.122 * 2.5;
+            const geom = new THREE.CylinderGeometry(R, R, H, 48, 1, true);
+
+            const texLoader = new THREE.TextureLoader();
+            const labelTex = texLoader.load('CylinderMarker_Label.png');
+            const cylMat = new THREE.MeshStandardMaterial({
+                map: labelTex,
+                roughness: 0.35,
+                metalness: 0.2
+            });
+            cylinderMesh = new THREE.Mesh(geom, cylMat);
+            window.cylinderGroup.add(cylinderMesh);
+
+            // 2. Augmented Video Screen on front curved surface
+            videoTexture = new THREE.VideoTexture(arVideoElement);
+            videoTexture.minFilter = THREE.LinearFilter;
+            videoTexture.magFilter = THREE.LinearFilter;
+            videoTexture.format = THREE.RGBAFormat;
+
+            // Curved cylindrical patch for video (thetaLength = 90 deg = pi/2)
+            const videoGeom = new THREE.CylinderGeometry(R * 1.02, R * 1.02, H * 0.75, 24, 1, true, -Math.PI / 4, Math.PI / 2);
+            const videoMat = new THREE.MeshBasicMaterial({
+                map: videoTexture,
+                side: THREE.DoubleSide
+            });
+            videoMesh = new THREE.Mesh(videoGeom, videoMat);
+            window.cylinderGroup.add(videoMesh);
+
+            // 3. Holographic Orbital Rings
+            const ringGeom = new THREE.TorusGeometry(R * 1.15, 0.003, 16, 64);
+            const ringMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff });
+            ringTop = new THREE.Mesh(ringGeom, ringMat);
+            ringTop.rotation.x = Math.PI / 2;
+            ringTop.position.y = H / 2;
+            window.cylinderGroup.add(ringTop);
+
+            ringBottom = new THREE.Mesh(ringGeom, ringMat);
+            ringBottom.rotation.x = Math.PI / 2;
+            ringBottom.position.y = -H / 2;
+            window.cylinderGroup.add(ringBottom);
+
+            // 4. Floating Holographic Info HUD Card (to the right of cylinder)
+            const cardCanvas = document.createElement('canvas');
+            cardCanvas.width = 512;
+            cardCanvas.height = 768;
+            const ctx = cardCanvas.getContext('2d');
+            drawCardTexture(ctx, cardCanvas.width, cardCanvas.height);
+
+            const cardTexture = new THREE.CanvasTexture(cardCanvas);
+            const cardGeom = new THREE.PlaneGeometry(0.12, 0.18);
+            const cardMat = new THREE.MeshBasicMaterial({
+                map: cardTexture,
+                transparent: true,
+                side: THREE.DoubleSide
+            });
+            holoCardMesh = new THREE.Mesh(cardGeom, cardMat);
+            holoCardMesh.position.set(R + 0.09, 0, 0);
+            holoCardMesh.rotation.y = -0.3;
+            window.cylinderGroup.add(holoCardMesh);
+
+            // Initially hide augmentations until tracked
+            window.cylinderGroup.visible = false;
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function drawCardTexture(ctx, w, h) {
+            ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+            ctx.fillRect(0, 0, w, h);
+            ctx.strokeStyle = "#00e5ff";
+            ctx.lineWidth = 6;
+            ctx.strokeRect(6, 6, w - 12, h - 12);
+
+            ctx.fillStyle = "#0284c7";
+            ctx.fillRect(16, 16, w - 32, 80);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 28px sans-serif";
+            ctx.fillText("CYLINDER AR TELEMETRY", 30, 68);
+
+            ctx.fillStyle = "#10b981";
+            ctx.font = "bold 22px sans-serif";
+            ctx.fillText("● TARGET LOCKED", 30, 135);
+
+            ctx.fillStyle = "#94a3b8";
+            ctx.font = "20px sans-serif";
+            const info = [
+                ["Radius:", "3.3 cm (D: 6.6cm)"],
+                ["Height:", "12.2 cm"],
+                ["Aspect Ratio:", "1.70 (Unrolled)"],
+                ["Augmentation:", "Augmented Video"],
+                ["Student:", "Varad Mandhare"],
+                ["Roll No:", "ADT23SOCB1574"],
+                ["Subject:", "Immersive App Dev"],
+                ["Engine:", "Vuforia Optical PnP"]
+            ];
+            let y = 185;
+            for (let [lbl, val] of info) {
+                ctx.fillStyle = "#94a3b8";
+                ctx.fillText(lbl, 30, y);
+                ctx.fillStyle = "#38bdf8";
+                ctx.fillText(val, 200, y);
+                y += 45;
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // 3. Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isTracked && window.cylinderGroup) {
+                // Gentle continuous showcase rotation
+                window.cylinderGroup.rotation.y += 0.008;
+
+                // Orbit rings counter-rotation
+                if (ringTop && ringBottom) {
+                    ringTop.rotation.z += 0.03;
+                    ringBottom.rotation.z -= 0.03;
+                }
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        // 4. Tracking State Management
+        function setTrackedState(tracked) {
+            isTracked = tracked;
+            if (isTracked) {
+                statusDot.classList.add('locked');
+                statusText.innerText = "● TARGET LOCKED: Cylinder Tracked";
+                scannerFrame.classList.add('locked');
+                laserLine.style.display = 'none';
+                scannerLabel.innerText = "Tracking Active (360° 6-DOF Pose)";
+                window.cylinderGroup.visible = true;
+
+                arVideoElement.play().catch(e => console.log("Video autoplay prevented:", e));
+            } else {
+                statusDot.classList.remove('locked');
+                statusText.innerText = "SEARCHING: Point at Cylinder Target";
+                scannerFrame.classList.remove('locked');
+                laserLine.style.display = 'block';
+                scannerLabel.innerText = "Align Cylinder In Reticle (D: 6.6cm, H: 12.2cm)";
+                window.cylinderGroup.visible = false;
+
+                arVideoElement.pause();
+            }
+        }
+
+        // Button Listeners
+        document.getElementById('btn-toggle-track').addEventListener('click', () => {
+            setTrackedState(!isTracked);
+        });
+
+        document.getElementById('btn-toggle-video').addEventListener('click', () => {
+            if (arVideoElement.paused) {
+                arVideoElement.play();
+            } else {
+                arVideoElement.pause();
+            }
+        });
+
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            setTrackedState(false);
+            if (window.cylinderGroup) {
+                window.cylinderGroup.rotation.set(0, 0, 0);
+            }
+            camera.position.set(0, 0.1, 0.65);
+            controls.reset();
+        });
+
+        // Initialize on load
+        window.addEventListener('DOMContentLoaded', () => {
+            initCamera();
+            init3D();
+            animate();
+        });
+    </script>
+</body>
+</html>
